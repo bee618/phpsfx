@@ -5,6 +5,11 @@ set -Eeuo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "${ROOT_DIR}"
 
+# 配置断言只看 profile 默认值：清掉调用方（如 CI 构建任务）注入的 PHPSFX_* 变量，避免影响结果。
+while IFS= read -r name; do
+  unset "${name}"
+done < <(compgen -e | grep '^PHPSFX_' || true)
+
 for php_version in 8.4 8.5; do
   case "${php_version}" in
     8.4) php_full_version=8.4.27 ;;
