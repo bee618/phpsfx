@@ -70,6 +70,17 @@ sqlite3,xlswriter,xsl,yaml
 
 依赖库安装前缀默认放在 `.build/swoole-cli/.global-prefix/<platform>`，不会写入 `/usr/local/swoole-cli`，适合 GitHub Actions 和 WSL 普通权限构建。
 
+## xlswriter 可选打包（xbase 运行时）
+
+默认产物不含 `xlswriter`。设置 `PHPSFX_WITH_XLSWRITER=1` 后，构建脚本会从 `viest/php-ext-xlswriter` 的固定 tag（默认 `v1.5.8`）拉取源码并校验 commit（`PHPSFX_XLSWRITER_COMMIT`），子模块 libxlsxwriter / libexpat 由父仓库锁定；扩展以 `--with-xlswriter --enable-reader` 静态编入，校验阶段要求 `xlswriter` 已加载并执行一次 xlsx 写入 / 读取。产物名追加 `-xlswriter` 后缀，不会与官方同名包混淆。
+
+xbase 使用的组合为 PHP 8.4 + `mysql-sqlite` + xlswriter，由 `.github/workflows/xbase-runtime.yml` 构建：推送 `xbase-v*` 标签即构建三个平台并发布 Release，产物为 `swoole-cli-php8.4-<平台>-mysql-sqlite-xlswriter`。
+
+```bash
+PHPSFX_PHP_VERSION=8.4 PHPSFX_DB_VARIANT=mysql-sqlite PHPSFX_WITH_XLSWRITER=1 \
+  bash scripts/build-swoole-cli.sh linux-x64
+```
+
 ## 自动发布
 
 GitHub Actions workflow：`.github/workflows/release.yml`。

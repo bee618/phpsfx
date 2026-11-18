@@ -1,0 +1,224 @@
+name: Release xbase runtime
+
+# xbase 内置运行时：PHP 8.4 + Swoole，mysql-sqlite PDO 组合，额外编入 xlswriter。
+# 与 release.yml（官方 24 包矩阵，v* 标签）互不影响：本流程只响应 xbase-v* 标签或手动触发。
+
+on:
+  push:
+    tags:
+      - 'xbase-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag, e.g. xbase-v6.2.5.1-1'
+        required: true
+        default: 'xbase-v6.2.5.1-1'
+        type: string
+      publish:
+        description: 'Create a GitHub Release after all builds and checks pass'
+        required: true
+        default: false
+        type: boolean
+      php_full_version:
+        description: 'Exact PHP 8.4 source/runtime version'
+        required: true
+        default: '8.4.27'
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: xbase-runtime-${{ github.event.inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  build:
+    name: Build PHP 8.4 ${{ matrix.platform.name }}-mysql-sqlite-xlswriter
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: linux-x64, runner: ubuntu-latest }
+          - { name: linux-a64, runner: ubuntu-24.04-arm }
+          - { name: macos-a64, runner: macos-15 }
+    env:
+      PHPSFX_PLATFORM: ${{ matrix.platform.name }}
+      PHPSFX_PROFILE_FILE: scripts/profiles/hyperfadmin-slim.env
+      PHPSFX_DB_VARIANT: mysql-sqlite
+      PHPSFX_WITH_XLSWRITER: '1'
+      PHPSFX_SWOOLE_ODBC: '0'
+      PHPSFX_PHP_VERSION: '8.4'
+      PHPSFX_PHP_FULL_VERSION: ${{ github.event.inputs.php_full_version || '8.4.27' }}
+      PHPSFX_RELEASE_VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      PHPSFX_SWOOLE_CLI_REF: e891b2b38720c5879c9a2c7894384b9af7228de0
+      PHPSFX_SWOOLE_SRC_REF: v6.2.5
+      PHPSFX_ASSET_NAME: swoole-cli-php8.4-${{ matrix.platform.name }}-mysql-sqlite-xlswriter
+      PHPSFX_BUILD_KEY: php8.4-${{ matrix.platform.name }}-mysql-sqlite-xlswriter
+      PHPSFX_DIST_DIR: ${{ github.workspace }}/dist/${{ matrix.platform.name }}
+      PHPSFX_BUILD_JOBS: 2
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake autopoint binutils bison bzip2 ca-certificates clang clang-tools cmake coreutils curl diffutils \
+            flex g++ gcc gettext git libtool libtool-bin lld locales lzip make meson musl-tools nasm netcat-openbsd \
+            ninja-build p7zip-full pkg-config python3 python3-pip re2c tar unzip wget xz-utils yasm zip
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: |
+          set -eux
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install autoconf automake bison cmake coreutils flex gettext libtool meson nasm ninja pkg-config re2c xz yasm || true
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: curl, openssl, mbstring, phar, zip
+          ini-values: memory_limit=-1, phar.readonly=0
+
+      - name: Cache Swoole CLI dependency sources
+        uses: actions/cache@v4
+        with:
+          path: .build/swoole-cli/pool
+          key: phpsfx-swoole-cli-pool-${{ env.PHPSFX_BUILD_KEY }}-${{ env.PHPSFX_PHP_FULL_VERSION }}-${{ env.PHPSFX_SWOOLE_CLI_REF }}-${{ env.PHPSFX_SWOOLE_SRC_REF }}-${{ hashFiles('scripts/profiles/*.env') }}
+          restore-keys: |
+            phpsfx-swoole-cli-pool-${{ env.PHPSFX_BUILD_KEY }}-
+            phpsfx-swoole-cli-pool-php8.4-${{ matrix.platform.name }}-mysql-
+            phpsfx-swoole-cli-pool-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Check release profiles
+        run: bash tests/test-release-variants.sh
+
+      - name: Install Hyperf smoke dependencies
+        run: |
+          composer validate --working-dir=tests/hyperf-smoke --strict
+          composer install --working-dir=tests/hyperf-smoke --no-dev --no-interaction --no-progress --prefer-dist --optimize-autoloader
+
+      - name: Build and validate swoole-cli
+        run: |
+          set -euo pipefail
+          set +e
+          bash scripts/build-swoole-cli.sh "${PHPSFX_PLATFORM}" 2>&1 | tee "build-${PHPSFX_BUILD_KEY}.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "${status}" -ne 0 ]; then
+            {
+              echo "== matched errors =="
+              grep -Ein 'fatal error|[^A-Za-z]error:|undefined reference|failed|killed|No such|cannot find|not found|permission denied|make(\\[[0-9]+\\])?: \\*\\*\\*' "build-${PHPSFX_BUILD_KEY}.log" | tail -140 || true
+              echo
+              echo "== build log tail =="
+              tail -240 "build-${PHPSFX_BUILD_KEY}.log"
+            } > "build-${PHPSFX_BUILD_KEY}-summary.log"
+            tail_text=$(tr '\n' '|' < "build-${PHPSFX_BUILD_KEY}-summary.log" | sed -e 's/%/%25/g')
+            echo "::error title=Build failed ${PHPSFX_BUILD_KEY}::${tail_text}"
+            exit "${status}"
+          fi
+
+      - name: Show runtime
+        run: |
+          set -eux
+          bin="${PHPSFX_DIST_DIR}/${PHPSFX_ASSET_NAME}"
+          "${bin}" -v
+          "${bin}" -m
+          "${bin}" --ri xlswriter
+
+      - name: Test PHP and Phar SFX packaging
+        run: bash scripts/test-packaging.sh "${PHPSFX_DIST_DIR}/${PHPSFX_ASSET_NAME}"
+
+      - name: Test Hyperf 3.2 runtime
+        run: bash scripts/test-hyperf-smoke.sh "${PHPSFX_DIST_DIR}/${PHPSFX_ASSET_NAME}"
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ env.PHPSFX_BUILD_KEY }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            build-${{ env.PHPSFX_BUILD_KEY }}.log
+            build-${{ env.PHPSFX_BUILD_KEY }}-summary.log
+
+      - name: Upload platform artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xbase-runtime-${{ env.PHPSFX_BUILD_KEY }}
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            ${{ env.PHPSFX_DIST_DIR }}/${{ env.PHPSFX_ASSET_NAME }}
+            ${{ env.PHPSFX_DIST_DIR }}/build-meta-${{ env.PHPSFX_BUILD_KEY }}.json
+
+  release:
+    name: Package and publish
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      PHPSFX_RELEASE_VERSION: ${{ github.event.inputs.version || github.ref_name }}
+    steps:
+      - name: Download platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: xbase-runtime-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        id: meta
+        run: |
+          set -eux
+          cd dist
+          ls -l
+          test "$(ls swoole-cli-php8.4-*-mysql-sqlite-xlswriter | wc -l)" -eq 3
+          sha256sum swoole-cli-php8.4-* > SHA256SUMS
+          cat SHA256SUMS
+          jq -s '{release: env.PHPSFX_RELEASE_VERSION, platforms: .}' build-meta-*.json > build-meta.json
+          printf 'php=%s\n' "$(jq -r '.platforms[0].php_full_version' build-meta.json)" >> "${GITHUB_OUTPUT}"
+          printf 'swoole=%s\n' "$(jq -r '.platforms[0].swoole_version' build-meta.json)" >> "${GITHUB_OUTPUT}"
+          printf 'xlswriter=%s\n' "$(jq -r '.platforms[0].xlswriter.version' build-meta.json)" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload combined workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xbase-runtime-release-${{ env.PHPSFX_RELEASE_VERSION }}
+          retention-days: 90
+          if-no-files-found: error
+          path: |
+            dist/swoole-cli-php8.4-*
+            dist/SHA256SUMS
+            dist/build-meta.json
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' || inputs.publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.PHPSFX_RELEASE_VERSION }}
+          name: xbase runtime ${{ env.PHPSFX_RELEASE_VERSION }}
+          target_commitish: ${{ github.sha }}
+          draft: false
+          prerelease: false
+          body: |
+            xbase 内置运行时：PHP ${{ steps.meta.outputs.php }} / Swoole ${{ steps.meta.outputs.swoole }} / xlswriter ${{ steps.meta.outputs.xlswriter }}。
+
+            PDO 驱动：mysql、sqlite（不含 sqlite3、pgsql、ODBC）。平台：linux-x64、linux-a64、macos-a64。
+            `SHA256SUMS` 覆盖全部二进制，`build-meta.json` 为各平台构建元数据。
+          files: |
+            dist/swoole-cli-php8.4-*
+            dist/SHA256SUMS
+            dist/build-meta.json

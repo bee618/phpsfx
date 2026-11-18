@@ -134,6 +134,27 @@ if (in_array("pdo_sqlite", $required, true)) {
     }
 }
 
+$xlswriterSmoke = null;
+if (in_array("xlswriter", $required, true) && extension_loaded("xlswriter")) {
+    $xlswriterSmoke = ["version" => function_exists("xlswriter_get_version") ? xlswriter_get_version() : null, "write_read" => false];
+    $dir = sys_get_temp_dir() . "/phpsfx-xlswriter-" . getmypid();
+    try {
+        @mkdir($dir, 0700, true);
+        $excel = new \Vtiful\Kernel\Excel(["path" => $dir]);
+        $excel->constMemory("check.xlsx", "S", false)->header(["id", "名称"])->data([["007", "甲"], [2, "乙"]])->output();
+        $rows = (new \Vtiful\Kernel\Excel(["path" => $dir]))->openFile("check.xlsx")->openSheet("S")->getSheetData();
+        $xlswriterSmoke["write_read"] = ($rows[1][1] ?? null) === "甲" && ($rows[0][1] ?? null) === "名称";
+        if (!$xlswriterSmoke["write_read"]) {
+            $errors[] = "xlswriter write/read smoke check returned unexpected rows: " . json_encode($rows, JSON_UNESCAPED_UNICODE);
+        }
+    } catch (Throwable $e) {
+        $errors[] = "xlswriter write/read smoke check failed: " . $e->getMessage();
+    } finally {
+        @unlink($dir . "/check.xlsx");
+        @rmdir($dir);
+    }
+}
+
 $result = [
     "php_version" => PHP_VERSION,
     "expected_php_version" => $expectedVersion !== "" ? $expectedVersion : null,
@@ -149,6 +170,7 @@ $result = [
     "allow_extra_extensions" => $allowExtra,
     "odbc" => $odbcSmoke,
     "sqlite_smoke" => $sqliteSmoke,
+    "xlswriter_smoke" => $xlswriterSmoke,
     "errors" => $errors,
 ];
 

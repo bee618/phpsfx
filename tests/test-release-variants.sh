@@ -70,6 +70,29 @@ for mode in slim odbc; do
   ' _ "${mode}" "${expected}"
 done
 
+# xbase runtime: opt-in xlswriter on top of mysql-sqlite, official defaults stay without xlswriter.
+PHPSFX_WITH_XLSWRITER=1 PHPSFX_XLSWRITER_REF='' PHPSFX_XLSWRITER_COMMIT='' PHPSFX_ASSET_SUFFIX='' PHPSFX_SWOOLE_ODBC=0 PHPSFX_PHP_VERSION=8.4 PHPSFX_PHP_FULL_VERSION='' PHPSFX_DB_VARIANT=mysql-sqlite bash -c '
+  set -Eeuo pipefail
+  source scripts/profiles/hyperfadmin-slim.env
+  [[ "${PHPSFX_ASSET_SUFFIX}" == mysql-sqlite-xlswriter ]] || exit 1
+  [[ "${PHPSFX_PHP_FULL_VERSION}" == 8.4.27 ]] || exit 1
+  [[ "${PHPSFX_REQUIRED_PDO_DRIVERS}" == mysql,sqlite ]] || exit 1
+  [[ "${PHPSFX_XLSWRITER_REF}" == v1.5.8 && "${PHPSFX_XLSWRITER_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+  [[ " ${PHPSFX_SWOOLE_CLI_PREPARE_FLAGS} " == *" +xlswriter "* && " ${PHPSFX_SWOOLE_CLI_PREPARE_FLAGS} " != *" -xlswriter "* ]] || exit 1
+  [[ ",${PHPSFX_SWOOLE_CLI_ENABLED_EXTENSIONS}," == *",xlswriter,"* ]] || exit 1
+  [[ ",${PHPSFX_REQUIRED_EXTENSIONS}," == *",xlswriter,"* ]] || exit 1
+  [[ ",${PHPSFX_FORBIDDEN_EXTENSIONS}," != *",xlswriter,"* && ",${PHPSFX_FORBIDDEN_EXTENSIONS}," == *",sqlite3,"* ]] || exit 1
+'
+for package in mysql pgsql sqlite-mysql-pgsql; do
+  PHPSFX_WITH_XLSWRITER='' PHPSFX_ASSET_SUFFIX='' PHPSFX_SWOOLE_ODBC=0 PHPSFX_DB_VARIANT="${package}" bash -c '
+    set -Eeuo pipefail
+    source scripts/profiles/hyperfadmin-slim.env
+    [[ "${PHPSFX_ASSET_SUFFIX}" == "$1" ]] || exit 1
+    [[ " ${PHPSFX_SWOOLE_CLI_PREPARE_FLAGS} " == *" -xlswriter "* ]] || exit 1
+    [[ ",${PHPSFX_FORBIDDEN_EXTENSIONS}," == *",xlswriter,"* ]] || exit 1
+  ' _ "${package}"
+done
+
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "${TMP_DIR}"' EXIT
 export TEST_RELEASE_URL="${TMP_DIR}/url"

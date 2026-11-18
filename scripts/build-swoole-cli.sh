@@ -52,6 +52,9 @@ DOWNLOAD_MIRROR_URL=${PHPSFX_DOWNLOAD_MIRROR_URL:-}
 ASSET_SUFFIX=${PHPSFX_ASSET_SUFFIX:-}
 SWOOLE_ODBC_ENABLED=${PHPSFX_SWOOLE_ODBC:-0}
 SWOOLE_ODBC_PREFIX=${PHPSFX_SWOOLE_ODBC_PREFIX:-/usr}
+XLSWRITER_REPO=${PHPSFX_XLSWRITER_REPO:-https://github.com/viest/php-ext-xlswriter.git}
+XLSWRITER_REF=${PHPSFX_XLSWRITER_REF:-v1.5.8}
+XLSWRITER_COMMIT=${PHPSFX_XLSWRITER_COMMIT:-3b4957b84e0d53d003a7577a1f078bd4a1b99a19}
 
 usage() {
   cat <<'USAGE'
@@ -82,6 +85,9 @@ Important environment variables:
   PHPSFX_REDIS_DISABLE_SESSION       Set to 1 to build redis without session hooks, default from profile: 1
   PHPSFX_ONIGURUMA_CLANG_COMPAT      Set to 1 to relax macOS clang oniguruma warnings, default from profile: 1
   PHPSFX_ASSET_SUFFIX                Optional release asset suffix
+  PHPSFX_WITH_XLSWRITER              Set to 1 to bundle the xlswriter extension, default: 0
+  PHPSFX_XLSWRITER_REF               xlswriter git tag when enabled, default from profile: v1.5.8
+  PHPSFX_XLSWRITER_COMMIT            Expected commit of PHPSFX_XLSWRITER_REF, default from profile
   PHPSFX_SWOOLE_ODBC                 Set to 1 to enable Swoole coroutine PDO ODBC support
   PHPSFX_SWOOLE_ODBC_PREFIX          unixODBC include/library prefix, default: /usr
   PHPSFX_GLOBAL_PREFIX               Dependency install prefix, default: .build/swoole-cli/.global-prefix/<platform>
@@ -502,6 +508,61 @@ prime_pdo_sqlite_extension_source() {
   rm -rf "${SWOOLE_CLI_DIR}/ext/pdo_sqlite"
   mkdir -p "${SWOOLE_CLI_DIR}/ext/pdo_sqlite"
   cp -R "${php_source_dir}/ext/pdo_sqlite/." "${SWOOLE_CLI_DIR}/ext/pdo_sqlite"
+}
+
+prime_xlswriter_extension_source() {
+  local ext_dir="${SWOOLE_CLI_DIR}/ext/xlswriter" recipe="${SWOOLE_CLI_DIR}/sapi/src/builder/extension/xlswriter.php" commit tmp_dir
+
+  # 上游配方固定 PECL 1.5.5（早于 PHP 8.4 兼容修复）；这里改为从固定 tag + commit 的 Git 源码构建，
+  # 子模块（libxlsxwriter/libexpat）由父仓库 gitlink 锁定，校验 commit 后再交给 prepare.php。
+  if [[ -f "${ext_dir}/config.m4" && -f "${ext_dir}/.phpsfx-xlswriter-commit" ]] \
+    && [[ "$(cat "${ext_dir}/.phpsfx-xlswriter-commit")" == "${XLSWRITER_COMMIT}" ]]; then
+    echo "Reusing xlswriter ${XLSWRITER_REF} (${XLSWRITER_COMMIT}) source" >&2
+  else
+    require_command git
+    tmp_dir="${ext_dir}.tmp.$$"
+    rm -rf "${tmp_dir}" "${ext_dir}"
+    echo "Fetching xlswriter ${XLSWRITER_REF} from ${XLSWRITER_REPO}" >&2
+    retry_command git clone --quiet --depth 1 --branch "${XLSWRITER_REF}" \
+      --recurse-submodules --shallow-submodules "${XLSWRITER_REPO}" "${tmp_dir}"
+    commit=$(git -C "${tmp_dir}" rev-parse HEAD)
+    if [[ "${commit}" != "${XLSWRITER_COMMIT}" ]]; then
+      echo "xlswriter ${XLSWRITER_REF} resolved to ${commit}, expected ${XLSWRITER_COMMIT}" >&2
+      rm -rf "${tmp_dir}"
+      exit 1
+    fi
+    for required in config.m4 library/libxlsxwriter/include/xlsxwriter.h library/libexpat/expat/lib/expat.h; do
+      if [[ ! -f "${tmp_dir}/${required}" ]]; then
+        echo "xlswriter source is incomplete, missing ${required}" >&2
+        rm -rf "${tmp_dir}"
+        exit 1
+      fi
+    done
+    git -C "${tmp_dir}" submodule status >&2
+    rm -rf "${tmp_dir}/.git"
+    find "${tmp_dir}/library" -name .git -prune -exec rm -rf {} +
+    printf '%s' "${commit}" > "${tmp_dir}/.phpsfx-xlswriter-commit"
+    mv "${tmp_dir}" "${ext_dir}"
+  fi
+
+  cat > "${recipe}" <<'PHP'
+<?php
+
+use SwooleCli\Extension;
+use SwooleCli\Preprocessor;
+
+return function (Preprocessor $p) {
+    // 源码已由 build-swoole-cli.sh 按固定 commit 放入 ext/xlswriter，不再走 PECL 下载。
+    $p->addExtension(
+        (new Extension('xlswriter'))
+            ->withHomePage('https://github.com/viest/php-ext-xlswriter')
+            ->withLicense('https://github.com/viest/php-ext-xlswriter/blob/master/LICENSE', Extension::LICENSE_BSD)
+            ->withOptions(' --with-xlswriter --enable-reader --with-openssl=' . OPENSSL_PREFIX)
+            ->withDependentLibraries('openssl')
+    );
+};
+PHP
+  echo "Prepared xlswriter ${XLSWRITER_REF} (${XLSWRITER_COMMIT})" >&2
 }
 
 prime_php85_core_extensions() {
@@ -1113,6 +1174,9 @@ fi
 if [[ " ${PREPARE_FLAGS} " == *" +pdo_pgsql "* ]]; then
   prime_pdo_pgsql_extension_source
 fi
+if [[ " ${PREPARE_FLAGS} " == *" +xlswriter "* ]]; then
+  prime_xlswriter_extension_source
+fi
 if [[ "${SWOOLE_ODBC_ENABLED}" == "1" ]]; then
   patch_swoole_odbc_configure_probe
 fi
@@ -1211,6 +1275,11 @@ if [[ "${SWOOLE_ODBC_ENABLED}" == "1" ]]; then
 else
   SWOOLE_ODBC_JSON=false
 fi
+if [[ " ${PREPARE_FLAGS} " == *" +xlswriter "* ]]; then
+  XLSWRITER_JSON="{\"ref\": \"${XLSWRITER_REF}\", \"commit\": \"${XLSWRITER_COMMIT}\", \"version\": \"$("${DIST_DIR}/${ASSET_NAME}" -r 'echo function_exists("xlswriter_get_version") ? xlswriter_get_version() : "";')\"}"
+else
+  XLSWRITER_JSON=null
+fi
 METADATA_ASSET="build-meta-php${PHP_VERSION}-${PLATFORM}${ASSET_SUFFIX_PART}.json"
 cat > "${DIST_DIR}/${METADATA_ASSET}" <<META
 {
@@ -1235,6 +1304,7 @@ cat > "${DIST_DIR}/${METADATA_ASSET}" <<META
   "zlib_slim_library": "${PHPSFX_ZLIB_SLIM_LIBRARY:-0}",
   "redis_disable_session": "${PHPSFX_REDIS_DISABLE_SESSION:-0}",
   "oniguruma_clang_compat": "${PHPSFX_ONIGURUMA_CLANG_COMPAT:-0}",
+  "xlswriter": ${XLSWRITER_JSON},
   "swoole_odbc": ${SWOOLE_ODBC_JSON},
   "swoole_odbc_prefix": "${SWOOLE_ODBC_PREFIX}",
   "odbc_dynamic_dependency": "${ODBC_DYNAMIC_DEPENDENCY}",
