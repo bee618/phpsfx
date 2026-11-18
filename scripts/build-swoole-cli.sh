@@ -510,6 +510,21 @@ prime_pdo_sqlite_extension_source() {
   cp -R "${php_source_dir}/ext/pdo_sqlite/." "${SWOOLE_CLI_DIR}/ext/pdo_sqlite"
 }
 
+patch_xlswriter_minizip_c23() {
+  local dir=$1
+
+  # libxlsxwriter 自带的 minizip 仍有两处 K&R 风格函数定义；PHP 8.4 在 macOS clang 上以 -std=gnu23 编译，
+  # C23 已移除这种写法，改成等价的 ANSI 原型（Linux gcc 不受影响，改后两边一致）。
+  perl -0pi -e 's/void fill_fopen_filefunc \(pzlib_filefunc_def\)\n\s*zlib_filefunc_def\* pzlib_filefunc_def;\n\{/void fill_fopen_filefunc (zlib_filefunc_def* pzlib_filefunc_def)\n{/' "${dir}/ioapi.c"
+  perl -0pi -e 's/extern int ZEXPORT unzRepair\(file, fileOut, fileOutTmp, nRecovered, bytesRecovered\)\nconst char\* file;\nconst char\* fileOut;\nconst char\* fileOutTmp;\nuLong\* nRecovered;\nuLong\* bytesRecovered;\n\{/extern int ZEXPORT unzRepair(const char* file, const char* fileOut, const char* fileOutTmp, uLong* nRecovered, uLong* bytesRecovered)\n{/' "${dir}/mztools.c"
+
+  if ! grep -q 'void fill_fopen_filefunc (zlib_filefunc_def\* pzlib_filefunc_def)' "${dir}/ioapi.c" \
+    || ! grep -q 'unzRepair(const char\* file, const char\* fileOut' "${dir}/mztools.c"; then
+    echo "Failed to patch xlswriter minizip K&R definitions for C23" >&2
+    exit 1
+  fi
+}
+
 prime_xlswriter_extension_source() {
   local ext_dir="${SWOOLE_CLI_DIR}/ext/xlswriter" recipe="${SWOOLE_CLI_DIR}/sapi/src/builder/extension/xlswriter.php" commit tmp_dir
 
@@ -544,6 +559,7 @@ prime_xlswriter_extension_source() {
     printf '%s' "${commit}" > "${tmp_dir}/.phpsfx-xlswriter-commit"
     mv "${tmp_dir}" "${ext_dir}"
   fi
+  patch_xlswriter_minizip_c23 "${ext_dir}/library/libxlsxwriter/third_party/minizip"
 
   cat > "${recipe}" <<'PHP'
 <?php
